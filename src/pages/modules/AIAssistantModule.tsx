@@ -8,27 +8,32 @@ import {
   Code,
   Calculator,
   Lightbulb,
-  User
+  User,
+  AlertCircle
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { motion, AnimatePresence } from "framer-motion";
 import Navbar from "@/components/Navbar";
+import { useToast } from "@/hooks/use-toast";
 
 interface Message {
   role: "user" | "assistant";
   content: string;
 }
 
+const CHAT_URL = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/chat`;
+
 const AIAssistantModule = () => {
   const [messages, setMessages] = useState<Message[]>([
     {
       role: "assistant",
-      content: "Hello! I'm your EduAI academic assistant. I'm here to help you with:\n\n• Explaining complex concepts\n• Homework assistance\n• Quiz preparation\n• Debugging code\n• Study planning\n\nHow can I help you today?"
+      content: "Hello! I'm EduAI, your academic assistant powered by real AI. I can help you with:\n\n• Explaining complex concepts with examples\n• Homework guidance and problem-solving\n• Debugging and understanding code\n• Study tips and exam preparation\n• Creating practice questions\n\nHow can I help you today?"
     }
   ]);
   const [input, setInput] = useState("");
-  const [isTyping, setIsTyping] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const { toast } = useToast();
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -45,156 +50,166 @@ const AIAssistantModule = () => {
     { icon: Lightbulb, text: "Give me study tips for exams" },
   ];
 
-  const getAIResponse = (userMessage: string): string => {
-    const lowerMessage = userMessage.toLowerCase();
-    
-    if (lowerMessage.includes("recursion")) {
-      return `**Recursion** is a programming technique where a function calls itself to solve smaller instances of the same problem.
+  const streamChat = async (messagesToSend: Message[]) => {
+    const resp = await fetch(CHAT_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY}`,
+      },
+      body: JSON.stringify({ messages: messagesToSend }),
+    });
 
-**Key Components:**
-1. **Base Case** - The condition that stops recursion
-2. **Recursive Case** - The function calling itself with modified parameters
-
-**Example - Factorial:**
-\`\`\`python
-def factorial(n):
-    if n <= 1:  # Base case
-        return 1
-    return n * factorial(n - 1)  # Recursive case
-\`\`\`
-
-**How it works for factorial(5):**
-- factorial(5) = 5 × factorial(4)
-- factorial(4) = 4 × factorial(3)
-- factorial(3) = 3 × factorial(2)
-- factorial(2) = 2 × factorial(1)
-- factorial(1) = 1 (base case reached!)
-
-Result: 5 × 4 × 3 × 2 × 1 = **120**
-
-Would you like me to explain another recursive example like Fibonacci?`;
-    }
-    
-    if (lowerMessage.includes("binary search")) {
-      return `**Binary Search** is an efficient algorithm for finding an item in a sorted array.
-
-**Time Complexity:** O(log n) - much faster than linear search!
-
-**How it works:**
-1. Start with the middle element
-2. If target matches middle, we're done!
-3. If target < middle, search left half
-4. If target > middle, search right half
-5. Repeat until found or exhausted
-
-**Example Code:**
-\`\`\`python
-def binary_search(arr, target):
-    left, right = 0, len(arr) - 1
-    
-    while left <= right:
-        mid = (left + right) // 2
-        if arr[mid] == target:
-            return mid
-        elif arr[mid] < target:
-            left = mid + 1
-        else:
-            right = mid - 1
-    return -1
-\`\`\`
-
-Would you like me to trace through a specific example?`;
+    if (!resp.ok) {
+      const errorData = await resp.json().catch(() => ({}));
+      
+      if (resp.status === 429) {
+        toast({
+          title: "Rate Limit Exceeded",
+          description: "Please wait a moment and try again.",
+          variant: "destructive",
+        });
+        throw new Error("Rate limit exceeded");
+      }
+      
+      if (resp.status === 402) {
+        toast({
+          title: "Credits Exhausted",
+          description: "AI credits have run out. Add credits in Settings.",
+          variant: "destructive",
+        });
+        throw new Error("Credits exhausted");
+      }
+      
+      throw new Error(errorData.error || "Failed to get AI response");
     }
 
-    if (lowerMessage.includes("study") || lowerMessage.includes("exam")) {
-      return `Here are my top **study tips** for exam preparation:
+    if (!resp.body) throw new Error("No response body");
 
-📚 **Active Learning:**
-- Don't just read - practice problems
-- Teach concepts to someone else
-- Create flashcards for key terms
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let textBuffer = "";
+    let assistantContent = "";
 
-⏰ **Time Management:**
-- Use Pomodoro technique (25 min study, 5 min break)
-- Start with difficult topics when fresh
-- Review before bed for better retention
+    // Create initial assistant message
+    setMessages(prev => [...prev, { role: "assistant", content: "" }]);
 
-✍️ **Effective Notes:**
-- Use diagrams and mind maps
-- Summarize each chapter in your own words
-- Highlight formulas and key definitions
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
 
-🧠 **Memory Techniques:**
-- Use mnemonics for lists
-- Connect new concepts to things you know
-- Practice spaced repetition
+      textBuffer += decoder.decode(value, { stream: true });
 
-💪 **Self-Care:**
-- Get 7-8 hours of sleep
-- Stay hydrated and eat brain foods
-- Take regular breaks to avoid burnout
+      let newlineIndex: number;
+      while ((newlineIndex = textBuffer.indexOf("\n")) !== -1) {
+        let line = textBuffer.slice(0, newlineIndex);
+        textBuffer = textBuffer.slice(newlineIndex + 1);
 
-Which subject are you preparing for? I can give more specific tips!`;
+        if (line.endsWith("\r")) line = line.slice(0, -1);
+        if (line.startsWith(":") || line.trim() === "") continue;
+        if (!line.startsWith("data: ")) continue;
+
+        const jsonStr = line.slice(6).trim();
+        if (jsonStr === "[DONE]") break;
+
+        try {
+          const parsed = JSON.parse(jsonStr);
+          const content = parsed.choices?.[0]?.delta?.content as string | undefined;
+          if (content) {
+            assistantContent += content;
+            setMessages(prev => {
+              const newMessages = [...prev];
+              newMessages[newMessages.length - 1] = {
+                role: "assistant",
+                content: assistantContent
+              };
+              return newMessages;
+            });
+          }
+        } catch {
+          // Incomplete JSON, put it back
+          textBuffer = line + "\n" + textBuffer;
+          break;
+        }
+      }
     }
 
-    if (lowerMessage.includes("debug") || lowerMessage.includes("code") || lowerMessage.includes("error")) {
-      return `I'd be happy to help debug your code! 🔍
-
-To help you effectively, please share:
-
-1. **The code** you're working with
-2. **The error message** (if any)
-3. **Expected behavior** vs what's happening
-4. **Programming language** you're using
-
-**Common debugging steps:**
-- Check for syntax errors (missing brackets, semicolons)
-- Verify variable names and scope
-- Add print statements to trace execution
-- Check edge cases (empty arrays, null values)
-- Review loop conditions for off-by-one errors
-
-Paste your code and I'll analyze it!`;
+    // Process any remaining buffer
+    if (textBuffer.trim()) {
+      for (let raw of textBuffer.split("\n")) {
+        if (!raw) continue;
+        if (raw.endsWith("\r")) raw = raw.slice(0, -1);
+        if (raw.startsWith(":") || raw.trim() === "") continue;
+        if (!raw.startsWith("data: ")) continue;
+        const jsonStr = raw.slice(6).trim();
+        if (jsonStr === "[DONE]") continue;
+        try {
+          const parsed = JSON.parse(jsonStr);
+          const content = parsed.choices?.[0]?.delta?.content as string | undefined;
+          if (content) {
+            assistantContent += content;
+            setMessages(prev => {
+              const newMessages = [...prev];
+              newMessages[newMessages.length - 1] = {
+                role: "assistant",
+                content: assistantContent
+              };
+              return newMessages;
+            });
+          }
+        } catch { /* ignore */ }
+      }
     }
-
-    return `That's a great question! Let me think about this...
-
-Based on what you're asking about "${userMessage}", here are some thoughts:
-
-1. This is an interesting topic that connects to several core concepts
-2. I'd recommend breaking it down into smaller parts
-3. Practice with examples is key to understanding
-
-Would you like me to:
-- Explain the fundamental concepts?
-- Provide practice problems?
-- Show code examples?
-- Create a study plan?
-
-Just let me know what would be most helpful! 📖`;
   };
 
-  const handleSend = () => {
-    if (!input.trim()) return;
+  const handleSend = async () => {
+    if (!input.trim() || isLoading) return;
 
     const userMessage: Message = { role: "user", content: input };
-    setMessages(prev => [...prev, userMessage]);
+    const updatedMessages = [...messages, userMessage];
+    setMessages(updatedMessages);
     setInput("");
-    setIsTyping(true);
+    setIsLoading(true);
 
-    // Simulate AI response delay
-    setTimeout(() => {
-      const aiResponse: Message = {
-        role: "assistant",
-        content: getAIResponse(input)
-      };
-      setMessages(prev => [...prev, aiResponse]);
-      setIsTyping(false);
-    }, 1500);
+    try {
+      // Send only the conversation history (excluding the initial greeting for API)
+      const apiMessages = updatedMessages.slice(1).map(m => ({
+        role: m.role,
+        content: m.content
+      }));
+      
+      await streamChat(apiMessages);
+    } catch (error) {
+      console.error("Chat error:", error);
+      // Remove the empty assistant message if there was an error
+      setMessages(prev => {
+        if (prev[prev.length - 1]?.role === "assistant" && !prev[prev.length - 1]?.content) {
+          return prev.slice(0, -1);
+        }
+        return prev;
+      });
+      
+      if (!(error instanceof Error && (error.message.includes("Rate limit") || error.message.includes("Credits")))) {
+        toast({
+          title: "Error",
+          description: "Failed to get a response. Please try again.",
+          variant: "destructive",
+        });
+      }
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   const handleSuggestion = (text: string) => {
     setInput(text);
+  };
+
+  const handleKeyPress = (e: React.KeyboardEvent) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      handleSend();
+    }
   };
 
   return (
@@ -215,7 +230,10 @@ Just let me know what would be most helpful! 📖`;
               </div>
               <div>
                 <h1 className="font-display text-xl font-bold">EduAI Assistant</h1>
-                <p className="text-sm text-green">● Online</p>
+                <p className="text-sm text-green flex items-center gap-1">
+                  <span className="w-2 h-2 bg-green rounded-full animate-pulse"></span>
+                  Powered by AI
+                </p>
               </div>
             </div>
           </div>
@@ -238,7 +256,7 @@ Just let me know what would be most helpful! 📖`;
                           <Sparkles className="w-4 h-4 text-primary" />
                         </div>
                         <div className="p-4 rounded-2xl rounded-tl-md bg-secondary/50 border border-border">
-                          <p className="text-sm whitespace-pre-line">{message.content}</p>
+                          <p className="text-sm whitespace-pre-wrap">{message.content}</p>
                         </div>
                       </div>
                     ) : (
@@ -255,7 +273,7 @@ Just let me know what would be most helpful! 📖`;
                 ))}
               </AnimatePresence>
 
-              {isTyping && (
+              {isLoading && messages[messages.length - 1]?.role !== "assistant" && (
                 <motion.div
                   initial={{ opacity: 0 }}
                   animate={{ opacity: 1 }}
@@ -303,14 +321,15 @@ Just let me know what would be most helpful! 📖`;
                   type="text"
                   value={input}
                   onChange={(e) => setInput(e.target.value)}
-                  onKeyPress={(e) => e.key === "Enter" && handleSend()}
+                  onKeyDown={handleKeyPress}
                   placeholder="Ask me anything about your studies..."
                   className="flex-1 bg-secondary/50 border border-border rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-primary transition-colors"
+                  disabled={isLoading}
                 />
                 <Button 
                   className="bg-primary text-primary-foreground rounded-xl p-3"
                   onClick={handleSend}
-                  disabled={!input.trim() || isTyping}
+                  disabled={!input.trim() || isLoading}
                 >
                   <Send className="w-5 h-5" />
                 </Button>
